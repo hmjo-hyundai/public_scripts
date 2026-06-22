@@ -47,12 +47,39 @@ trap cleanup EXIT
 show_install_target_notice() {
   echo "############ 설치 대상 확인 ############"
   echo "설치 대상 프로젝트: $PWD"
-  echo "이 위치에 .claude/, .codex/agents/, AGENTS.md 설정을 생성/갱신합니다."
+  echo "이 위치에 .claude/, .codex/config.toml, .codex/agents/, AGENTS.md 설정을 생성/갱신합니다."
   if [ ! -f AGENTS.md ] && [ ! -d .claude ] && [ ! -d .codex ]; then
     echo "주의: 이 폴더에는 AGENTS.md, .claude, .codex가 없습니다."
     echo "      의도한 프로젝트 폴더가 맞는지 확인하세요. 설치는 계속 진행합니다."
   fi
   echo
+}
+
+rewrite_codex_mcp_config() {
+  local target="$1"
+
+  touch "$target" || die "Codex config 파일 생성 실패: $target"
+  TMP_CODEX_CONFIG="$(mktemp)" || die "임시 파일 생성 실패"
+  if ! awk '
+    /^\[mcp_servers\.agentrag(\]|\.)/ { skip = 1; next }
+    /^\[mcp_servers\.ShucleRiderRAG(\]|\.)/ { skip = 1; next }
+    skip && /^\[/ { skip = 0 }
+    !skip { print }
+  ' "$target" > "$TMP_CODEX_CONFIG"; then
+    die "Codex config 기존 MCP 블록 정리 실패: $target"
+  fi
+  mv "$TMP_CODEX_CONFIG" "$target" || die "Codex config 갱신 실패: $target"
+  TMP_CODEX_CONFIG=""
+
+  {
+    if [ -s "$target" ]; then
+      printf '\n'
+    fi
+    cat <<CODEX_CFG_EOF
+[mcp_servers.ShucleRiderRAG]
+url = "$URL"
+CODEX_CFG_EOF
+  } >> "$target" || die "Codex config MCP 블록 작성 실패: $target"
 }
 
 update_agents_md() {
@@ -234,24 +261,12 @@ if [ -f "$CODEX_CONFIG" ]; then
   cp -p "$CODEX_CONFIG" "$CODEX_CONFIG_BACKUP" || die "Codex config 백업 실패: $CODEX_CONFIG_BACKUP"
   echo "  -> Codex config 백업 생성: $CODEX_CONFIG_BACKUP"
 fi
-touch "$CODEX_CONFIG" || die "Codex config 파일 생성 실패: $CODEX_CONFIG"
-TMP_CODEX_CONFIG="$(mktemp)" || die "임시 파일 생성 실패"
-if ! awk '
-  /^\[mcp_servers\.agentrag\]$/ { skip = 1; next }
-  /^\[mcp_servers\.ShucleRiderRAG\]$/ { skip = 1; next }
-  skip && /^\[/ { skip = 0 }
-  !skip { print }
-' "$CODEX_CONFIG" > "$TMP_CODEX_CONFIG"; then
-  die "Codex config 기존 MCP 블록 정리 실패"
-fi
-mv "$TMP_CODEX_CONFIG" "$CODEX_CONFIG" || die "Codex config 갱신 실패: $CODEX_CONFIG"
-TMP_CODEX_CONFIG=""
-
-cat >> "$CODEX_CONFIG" <<CODEX_CFG_EOF
-[mcp_servers.ShucleRiderRAG]
-url = "$URL"
-CODEX_CFG_EOF
+rewrite_codex_mcp_config "$CODEX_CONFIG"
 echo "  -> ~/.codex/config.toml 에 ShucleRiderRAG(url) 재등록: $URL"
+
+PROJECT_CODEX_CONFIG=".codex/config.toml"
+rewrite_codex_mcp_config "$PROJECT_CODEX_CONFIG"
+echo "  -> .codex/config.toml 에 ShucleRiderRAG(url) 재등록: $URL"
 
 cat > .codex/agents/shuclientbot.toml <<CODEX_AGENT_EOF
 # ShuClientBot managed file.
