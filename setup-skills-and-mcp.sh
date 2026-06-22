@@ -10,6 +10,9 @@ set -euo pipefail
 # 기본은 A(Mac Studio) 원격 URL, --local 은 http://127.0.0.1:8848/mcp.
 # =============================================================
 
+# 이 파일을 수정할 때마다 SCRIPT_VERSION을 1씩 올린다.
+SCRIPT_VERSION=1
+
 REMOTE_URL="http://HMC123ui-Mac-Studio.local:8848/mcp"
 LOCAL_URL="http://127.0.0.1:8848/mcp"
 if [ -n "${SHUCLIENTBOT_MCP_URL:-}" ]; then
@@ -46,6 +49,7 @@ trap cleanup EXIT
 
 show_install_target_notice() {
   echo "############ 설치 대상 확인 ############"
+  echo "스크립트 버전: $SCRIPT_VERSION"
   echo "설치 대상 프로젝트: $PWD"
   echo "이 위치에 .claude/, .codex/config.toml, .codex/agents/, AGENTS.md 설정을 생성/갱신합니다."
   if [ ! -f AGENTS.md ] && [ ! -d .claude ] && [ ! -d .codex ]; then
@@ -195,6 +199,7 @@ AGENTS_EOF
 }
 
 usage() {
+  echo "setup-skills-and-mcp.sh version $SCRIPT_VERSION"
   echo "사용법: bash setup-skills-and-mcp.sh [--local] [--url MCP_URL]"
   echo "  --local        로컬 MCP 서버($LOCAL_URL)에 연결"
   echo "  --url MCP_URL  직접 지정한 MCP URL에 연결"
