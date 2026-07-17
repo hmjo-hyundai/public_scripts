@@ -11,7 +11,7 @@ set -euo pipefail
 # =============================================================
 
 # 이 파일을 수정할 때마다 SCRIPT_VERSION을 1씩 올린다.
-SCRIPT_VERSION=3
+SCRIPT_VERSION=4
 
 REMOTE_URL="http://HMC123ui-Mac-Studio.local:8848/mcp"
 LOCAL_URL="http://127.0.0.1:8848/mcp"
@@ -81,6 +81,21 @@ remove_codex_main_mcp_config() {
   fi
   mv "$TMP_CODEX_CONFIG" "$target" || die "Codex config 갱신 실패: $target"
   TMP_CODEX_CONFIG=""
+}
+
+remove_claude_local_mcp() {
+  local name="$1"
+  local output
+
+  if output="$(claude mcp remove --scope local "$name" 2>&1)"; then
+    return 0
+  fi
+  if [ "$output" = "No MCP server named \"$name\" in local scope" ]; then
+    return 0
+  fi
+
+  printf '%s\n' "$output" >&2
+  die "Claude local MCP 제거 실패: $name"
 }
 
 update_claude_permissions() {
@@ -242,9 +257,9 @@ curl -s --max-time "$MCP_STARTUP_TIMEOUT_SEC" -o /dev/null -w 'initialize -> HTT
 echo
 echo "############ 1) Claude Code (서브에이전트 전용 MCP + 스킬) ############"
 if command -v claude >/dev/null 2>&1; then
-  claude mcp remove agentrag >/dev/null 2>&1 || true
-  claude mcp remove ShucleRiderRAG >/dev/null 2>&1 || true
-  echo "  -> Claude 메인 세션의 기존 ShucleRiderRAG MCP 등록 제거 완료"
+  remove_claude_local_mcp agentrag
+  remove_claude_local_mcp ShucleRiderRAG
+  echo "  -> Claude 메인 세션의 기존 local MCP 등록 정리 완료"
 
   mkdir -p .claude/agents .claude/skills/shuclientbot || die "Claude 설정 디렉터리 생성 실패"
 
