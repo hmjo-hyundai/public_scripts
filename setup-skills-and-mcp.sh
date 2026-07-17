@@ -11,10 +11,11 @@ set -euo pipefail
 # =============================================================
 
 # 이 파일을 수정할 때마다 SCRIPT_VERSION을 1씩 올린다.
-SCRIPT_VERSION=1
+SCRIPT_VERSION=2
 
 REMOTE_URL="http://HMC123ui-Mac-Studio.local:8848/mcp"
 LOCAL_URL="http://127.0.0.1:8848/mcp"
+MCP_STARTUP_TIMEOUT_SEC=3
 if [ -n "${SHUCLIENTBOT_MCP_URL:-}" ]; then
   URL="$SHUCLIENTBOT_MCP_URL"
   MODE="env"
@@ -83,6 +84,7 @@ rewrite_codex_mcp_config() {
 [mcp_servers.ShucleRiderRAG]
 url = "$URL"
 enabled = true
+startup_timeout_sec = $MCP_STARTUP_TIMEOUT_SEC
 default_tools_approval_mode = "approve"
 CODEX_CFG_EOF
   } >> "$target" || die "Codex config MCP 블록 작성 실패: $target"
@@ -239,7 +241,7 @@ show_install_target_notice
 echo "############ 0) MCP 서버 도달 확인 ############"
 echo "mode=$MODE"
 echo "url=$URL"
-curl -s --max-time 10 -o /dev/null -w 'initialize -> HTTP %{http_code}  (200 이면 OK)\n' -X POST \
+curl -s --max-time "$MCP_STARTUP_TIMEOUT_SEC" -o /dev/null -w 'initialize -> HTTP %{http_code}  (200 이면 OK)\n' -X POST \
   -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"p","version":"0"}}}' \
   "$URL" || echo "  (도달 실패 -> 서버 실행 상태/URL/방화벽 확인. 설치는 계속 진행)"
@@ -349,6 +351,7 @@ developer_instructions = """
 [mcp_servers.ShucleRiderRAG]
 url = "$URL"
 enabled = true
+startup_timeout_sec = $MCP_STARTUP_TIMEOUT_SEC
 default_tools_approval_mode = "approve"
 CODEX_AGENT_EOF
 echo "  -> .codex/agents/shuclientbot.toml 작성"
