@@ -1,0 +1,21 @@
+name: Check installer
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Check Bash syntax
+        run: bash -n setup-skills-and-mcp.sh
+      - name: Run isolated regression tests
+        run: uv run tests/test_setup_installer.py -q
