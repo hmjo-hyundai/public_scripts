@@ -3,6 +3,11 @@
 Claude Code와 Codex에서 셔클라봇(ShuClientBot)을 사용하는 공개 설치 스크립트입니다.
 현재 버전은 **v5**입니다.
 
+설치 실행 (shucle-rider-ios 폴더에서 실행 !!)
+```bash
+curl -fsSL https://raw.githubusercontent.com/hmjo-hyundai/public_scripts/main/setup-skills-and-mcp.sh | bash
+```
+
 ## 이 저장소의 역할
 
 이 저장소는 비공개 AgentRAG 저장소에 접근할 수 없는 사용자를 위한 **공개 배포 창구**입니다.
