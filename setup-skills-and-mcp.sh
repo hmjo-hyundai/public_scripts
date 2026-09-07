@@ -11,11 +11,12 @@ set -euo pipefail
 # =============================================================
 
 # 이 파일을 수정할 때마다 SCRIPT_VERSION을 1씩 올린다.
-SCRIPT_VERSION=5
+SCRIPT_VERSION=6
 
 REMOTE_URL="http://HMC123ui-Mac-Studio.local:8848/mcp"
 LOCAL_URL="http://127.0.0.1:8848/mcp"
 MCP_STARTUP_TIMEOUT_SEC=3
+UPDATE_AGENTS_MD=false
 if [ -n "${SHUCLIENTBOT_MCP_URL:-}" ]; then
   URL="$SHUCLIENTBOT_MCP_URL"
   MODE="env"
@@ -48,7 +49,12 @@ show_install_target_notice() {
   echo "############ 설치 대상 확인 ############"
   echo "스크립트 버전: $SCRIPT_VERSION"
   echo "설치 대상 프로젝트: $PWD"
-  echo "이 위치에 .claude/, .codex/agents/, AGENTS.md 설정을 생성/갱신합니다."
+  echo "이 위치에 .claude/, .codex/agents/ 설정을 생성/갱신합니다."
+  if [ "$UPDATE_AGENTS_MD" = true ]; then
+    echo "AGENTS.md의 셔클라봇 관리 블록도 생성/갱신합니다."
+  else
+    echo "AGENTS.md는 현재 상태로 유지합니다."
+  fi
   echo "Claude local 등록과 Codex 사용자/프로젝트의 기존 메인 MCP 등록을 정리합니다."
   echo "Codex 사용자 설정: $CODEX_CONFIG"
   if [ ! -f AGENTS.md ] && [ ! -d .claude ] && [ ! -d .codex ]; then
@@ -281,14 +287,18 @@ AGENTS_EOF
 
 usage() {
   echo "setup-skills-and-mcp.sh version $SCRIPT_VERSION"
-  echo "사용법: bash setup-skills-and-mcp.sh [--local] [--url MCP_URL]"
+  echo "사용법: bash setup-skills-and-mcp.sh [--local] [--url MCP_URL] [--update-agents]"
   echo "  --local        로컬 MCP 서버($LOCAL_URL)에 연결"
   echo "  --url MCP_URL  직접 지정한 MCP URL에 연결"
+  echo "  --update-agents  AGENTS.md의 셔클라봇 안내 블록도 생성/갱신 (기본: 변경 안 함)"
   echo "  SHUCLIENTBOT_MCP_URL 환경 변수로도 MCP URL을 지정할 수 있습니다."
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --update-agents)
+      UPDATE_AGENTS_MD=true
+      ;;
     --local)
       URL="$LOCAL_URL"
       MODE="local"
@@ -322,7 +332,9 @@ show_install_target_notice
 
 # Validate existing files before removing any CLI registration or replacing files.
 command -v uv >/dev/null 2>&1 || die "설정 갱신에는 uv가 필요합니다. uv를 설치한 뒤 다시 실행하세요."
-validate_agents_md
+if [ "$UPDATE_AGENTS_MD" = true ]; then
+  validate_agents_md
+fi
 edit_codex_mcp_config "$CODEX_CONFIG" remove check
 edit_codex_mcp_config "$PROJECT_CODEX_CONFIG" remove check
 if command -v claude >/dev/null 2>&1; then
@@ -417,7 +429,7 @@ else
 fi
 
 echo
-echo "############ 2) Codex (서브에이전트 전용 MCP + AGENTS.md) ############"
+echo "############ 2) Codex (서브에이전트 전용 MCP) ############"
 mkdir -p .codex/agents || die "Codex 설정 디렉터리 생성 실패"
 
 edit_codex_mcp_config "$CODEX_CONFIG" remove
@@ -454,8 +466,10 @@ CODEX_AGENT_EOF
 edit_codex_mcp_config .codex/agents/shuclientbot.toml agent
 echo "  -> .codex/agents/shuclientbot.toml 에 전용 MCP 등록: $URL"
 
-update_agents_md
-echo "  -> AGENTS.md 셔클라봇 관리 블록 갱신"
+if [ "$UPDATE_AGENTS_MD" = true ]; then
+  update_agents_md
+  echo "  -> AGENTS.md 셔클라봇 관리 블록 갱신"
+fi
 
 echo
 echo "✅ 완료. Claude Code / Codex 재시작 후  '셔클라봇으로 ~ 확인해줘' 로 테스트."

@@ -150,14 +150,15 @@ def test_reinstall_preserves_rules_permissions_and_claude_scopes(installer: Inst
         "permissions": {"allow": ["Read"], "deny": ["Bash(rm:*)"]}, "other": 42,
     }))
     original_state = json.loads(installer.claude_state.read_text())
-    first = installer.run("--local")
+    first = installer.run("--local", "--update-agents")
     assert first.returncode == 0, first.stderr
     paths = [agents, settings, installer.global_config]
     before = {path: path.read_bytes() for path in paths}
-    second = installer.run("--local")
+    second = installer.run("--local", "--update-agents")
     assert second.returncode == 0, second.stderr
     assert before == {path: path.read_bytes() for path in paths}
     assert "Keep before." in agents.read_text() and "Keep after." in agents.read_text()
+    assert "Old" not in agents.read_text()
     assert agents.read_text().count(START) == agents.read_text().count(END) == 1
     permissions = json.loads(settings.read_text())
     assert permissions == {
@@ -187,7 +188,8 @@ def test_preflight_failure_preserves_files(installer: Installer, invalid_file: s
     before = {p: p.read_bytes() for p in installer.project.rglob("*") if p.is_file()}
     before[installer.global_config] = installer.global_config.read_bytes()
     state = installer.claude_state.read_bytes()
-    result = installer.run("--local")
+    extra = ("--update-agents",) if invalid_file == "AGENTS.md" else ()
+    result = installer.run("--local", *extra)
     assert result.returncode != 0 and "오류:" in result.stderr
     after = {p: p.read_bytes() for p in installer.project.rglob("*") if p.is_file()}
     after[installer.global_config] = installer.global_config.read_bytes()
@@ -219,7 +221,7 @@ def test_agents_keep_scoped_mcp_and_current_tools(installer: Installer):
     }
     skill = (installer.project / ".claude/skills/shuclientbot/SKILL.md").read_text()
     assert "lookup_pull_requests" in skill and "서브에이전트(Agent)" in skill
-    assert "lookup_pull_requests" in (installer.project / "AGENTS.md").read_text()
+    assert not (installer.project / "AGENTS.md").exists()
 
 
 def test_missing_global_config_is_not_created(installer: Installer):
@@ -229,6 +231,7 @@ def test_missing_global_config_is_not_created(installer: Installer):
     assert not installer.global_config.exists()
     assert not (installer.project / ".codex/config.toml").exists()
     assert (installer.project / ".codex/agents/shuclientbot.toml").exists()
+    assert not (installer.project / "AGENTS.md").exists()
 
 
 def test_claude_removal_errors_are_not_ignored(installer: Installer):
@@ -244,7 +247,7 @@ def test_claude_removal_errors_are_not_ignored(installer: Installer):
 def test_crlf_markers_are_replaced(installer: Installer):
     agents = installer.project / "AGENTS.md"
     agents.write_bytes(f"# Existing\r\n{START}\r\nOld\r\n{END}\r\nKeep after.\r\n".encode())
-    result = installer.run("--local")
+    result = installer.run("--local", "--update-agents")
     assert result.returncode == 0, result.stderr
     assert "Old" not in agents.read_text() and "Keep after." in agents.read_text()
     assert agents.read_text().count(START) == agents.read_text().count(END) == 1
@@ -287,14 +290,49 @@ def test_lan_default_is_preserved(installer: Installer):
     assert agent["mcp_servers"][SERVER]["url"] == "http://HMC123ui-Mac-Studio.local:8848/mcp"
 
 
-def test_script_runs_from_stdin(installer: Installer):
+@pytest.mark.parametrize("update_agents", [False, True])
+def test_script_runs_from_stdin(installer: Installer, update_agents: bool):
+    extra = ["--update-agents"] if update_agents else []
     result = subprocess.run(
-        ["/bin/bash", "-s", "--", "--local"], input=installer.script.read_text(),
+        ["/bin/bash", "-s", "--", "--local", *extra], input=installer.script.read_text(),
         cwd=installer.project, env=installer.env, text=True, capture_output=True, timeout=30,
     )
     assert result.returncode == 0, result.stderr
     assert "✅ 완료" in result.stdout
     assert (installer.project / ".codex/agents/shuclientbot.toml").exists()
+    assert (installer.project / "AGENTS.md").exists() == update_agents
+
+
+@pytest.mark.parametrize("original", [
+    b"# Existing rules\nKeep this file.\n",
+    f"{START}\nExisting ShuClientBot instructions\n{END}\n".encode(),
+    f"{START}\nUnclosed block\n## Important\nKeep after.\n".encode(),
+    f"{END}\nOrphan end marker\n".encode(),
+    f"# Existing\r\n{START}\r\nOld\r\n{END}\r\nKeep after.\r\n".encode(),
+])
+def test_default_install_preserves_agents_exactly(installer: Installer, original: bytes):
+    agents = installer.project / "AGENTS.md"
+    agents.write_bytes(original)
+    agents.chmod(0o444)
+    before = agents.stat()
+
+    result = installer.run("--local")
+
+    assert result.returncode == 0, result.stderr
+    assert agents.read_bytes() == original
+    after = agents.stat()
+    assert (after.st_ino, after.st_mode, after.st_mtime_ns) == (
+        before.st_ino, before.st_mode, before.st_mtime_ns,
+    )
+    assert (installer.project / ".codex/agents/shuclientbot.toml").exists()
+
+
+def test_update_agents_creates_missing_file(installer: Installer):
+    result = installer.run("--local", "--update-agents")
+    assert result.returncode == 0, result.stderr
+    content = (installer.project / "AGENTS.md").read_text()
+    assert content.count(START) == content.count(END) == 1
+    assert "lookup_pull_requests" in content
 
 
 if __name__ == "__main__":

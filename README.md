@@ -1,7 +1,7 @@
 # public_scripts
 
 Claude Code와 Codex에서 셔클라봇(ShuClientBot)을 사용하는 공개 설치 스크립트입니다.
-현재 버전은 **v5**입니다.
+현재 버전은 **v6**입니다. 기본 설치는 `AGENTS.md`를 생성하거나 수정하지 않습니다.
 
 설치 실행 (shucle-rider-ios 폴더에서 실행 !!)
 ```bash
@@ -35,6 +35,9 @@ bash /path/to/public_scripts/setup-skills-and-mcp.sh --local
 
 # MCP URL 직접 지정
 bash /path/to/public_scripts/setup-skills-and-mcp.sh --url https://example.com/mcp
+
+# AGENTS.md에도 셔클라봇 위임 안내를 넣으려는 경우에만 지정
+bash /path/to/public_scripts/setup-skills-and-mcp.sh --update-agents
 ```
 
 현재 사용 중인 Mac Studio의 LAN 기본주소(`REMOTE_URL`)를 유지합니다. 해당 서버에 접근할 수
@@ -64,6 +67,9 @@ curl -fsSL https://raw.githubusercontent.com/hmjo-hyundai/public_scripts/main/se
 
 # 같은 머신의 MCP 서버
 curl -fsSL https://raw.githubusercontent.com/hmjo-hyundai/public_scripts/main/setup-skills-and-mcp.sh | bash -s -- --local
+
+# AGENTS.md 안내 블록도 갱신하는 선택 설치
+curl -fsSL https://raw.githubusercontent.com/hmjo-hyundai/public_scripts/main/setup-skills-and-mcp.sh | bash -s -- --update-agents
 ```
 
 설치 과정에서 `uv run --no-project --with tomlkit==0.13.3 python`으로 TOML 편집 환경을
@@ -81,7 +87,11 @@ MCP 연결은 `shuclientbot` 서브에이전트 설정에 넣습니다. 메인 �
 | Claude Code | `.claude/agents/shuclientbot.md`에 전용 `mcpServers`, `.claude/skills/shuclientbot/SKILL.md`에 호출 지침 |
 | Claude 권한 | `.claude/settings.local.json`의 기존 설정을 유지하며 `mcp__ShucleRiderRAG__*` 허용 추가 |
 | Codex | `.codex/agents/shuclientbot.toml`에 전용 MCP와 에이전트 지침 |
-| 공통 지침 | `AGENTS.md`의 `SHUCLIENTBOT_START`/`SHUCLIENTBOT_END` 관리 블록 갱신 |
+| 공통 지침 (선택) | `--update-agents`를 지정할 때만 `AGENTS.md`의 `SHUCLIENTBOT_START`/`SHUCLIENTBOT_END` 관리 블록 갱신 |
+
+기본 실행에서는 기존 `AGENTS.md`를 그대로 두며, 파일이 없으면 새로 만들지 않습니다.
+이전에 설치한 셔클라봇 안내 블록도 자동으로 제거하지 않습니다. 별도 안내 블록 없이도
+“셔클라봇으로 확인해줘”처럼 명시하여 에이전트를 사용할 수 있습니다.
 
 기존 메인 MCP 등록은 다음 범위에서 정리합니다.
 
@@ -96,8 +106,9 @@ MCP 연결은 `shuclientbot` 서브에이전트 설정에 넣습니다. 메인 �
 사전 HTTP 도달 확인과 Codex MCP 초기 연결 제한시간은 3초입니다. 도달 확인이 실패해도
 설정 설치는 계속 진행하므로, 완료 메시지만으로 서버 연결 성공을 판단하지 마세요.
 
-기존 TOML·Claude JSON·AGENTS 관리 마커는 변경 전에 검증합니다. 문법 오류 또는 짝이 맞지
-않는 마커가 있으면 원본을 보존한 채 중단합니다. TOML은 정규식 대신 파서로 편집하고,
+기존 TOML·Claude JSON은 변경 전에 검증합니다. AGENTS 관리 마커는 `--update-agents`를
+지정했을 때만 검증하므로, 기본 설치는 마커 상태에 영향을 받지 않습니다. 검증 대상 파일에
+문법 오류 또는 짝이 맞지 않는 마커가 있으면 원본을 보존한 채 중단합니다. TOML은 파서로 편집하고,
 완성된 내용을 검증한 뒤 같은 디렉터리의 임시 파일로 교체합니다.
 
 ## 사용 확인
@@ -122,7 +133,7 @@ bash -n setup-skills-and-mcp.sh
 
 테스트는 임시 디렉터리와 CLI 대역을 사용합니다. 실제 사용자 설정이나 MCP 서버를 건드리지
 않으며, TOML 보존, 오류 시 원본 유지, 재실행, Claude scope와 삭제 오류, 전용 MCP 설정,
-PR 조회 지침, URL 인코딩, Tailscale 전용 주소 제외와 파이프 설치를 확인합니다.
+PR 조회 지침, URL 인코딩, Tailscale 전용 주소 제외, 파이프 설치, AGENTS 기본 보존과 선택 갱신을 확인합니다.
 
 ## 권장 배포·업데이트 운영
 
@@ -130,7 +141,7 @@ PR 조회 지침, URL 인코딩, Tailscale 전용 주소 제외와 파이프 설
 2. PR에서 회귀 테스트와 Bash 문법 검사를 통과시킵니다. 이 저장소의 GitHub Actions는
    push와 PR에 대해 이 검사를 실행합니다.
 3. 검증한 커밋을 `main`에 반영합니다. 이 시점부터 위 익명 다운로드 URL의 내용이 바뀝니다.
-4. 팀에 배포할 버전에는 `setup-v5` 같은 태그와 GitHub Release를 만듭니다. Release에는
+4. 팀에 배포할 버전에는 `setup-v6` 같은 태그와 GitHub Release를 만듭니다. Release에는
    `setup-skills-and-mcp.sh`, 해당 파일의 SHA-256 체크섬, 변경점과 필요한 재설치 절차를 넣습니다.
 5. 팀의 설치 안내에는 `main` 대신 검증한 태그나 커밋으로 고정한 URL을 사용합니다.
    기존 태그는 다른 커밋으로 옮기지 않고, 문제가 있으면 직전 태그를 안내하거나 새 버전을 배포합니다.
