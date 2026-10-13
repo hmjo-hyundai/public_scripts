@@ -85,6 +85,7 @@ def installer(tmp_path: Path) -> Installer:
         "from pathlib import Path\n"
         "path = Path(os.environ['SETUP_TEST_CLAUDE_STATE'])\n"
         "state = json.loads(path.read_text())\n"
+        "state.setdefault('cwds', []).append(os.getcwd())\n"
         "args = sys.argv[1:]\n"
         "assert args[:4] == ['mcp', 'remove', '--scope', 'local'], args\n"
         "state['calls'].append(args)\n"
@@ -333,6 +334,136 @@ def test_update_agents_creates_missing_file(installer: Installer):
     content = (installer.project / "AGENTS.md").read_text()
     assert content.count(START) == content.count(END) == 1
     assert "lookup_pull_requests" in content
+
+
+
+def init_reference_repo(path: Path, remote: str | None = None) -> None:
+    path.mkdir()
+    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
+    if remote:
+        subprocess.run(
+            ["git", "-C", str(path), "remote", "add", "origin", remote],
+            check=True, capture_output=True,
+        )
+
+
+def installed_reference(target: Path) -> dict:
+    agent = tomllib.loads((target / ".codex/agents/shuclientbot.toml").read_text())
+    instructions = agent["developer_instructions"]
+    context = next(line for line in instructions.splitlines() if line.startswith('{"local_path":'))
+    for relative in (".claude/agents/shuclientbot.md", ".claude/skills/shuclientbot/SKILL.md"):
+        assert context in (target / relative).read_text()
+    assert "기획·정책·Slack 질문은 로컬 레포 없이" in instructions
+    return json.loads(context)
+
+
+@pytest.mark.parametrize("remote", [
+    "git@github.com:hkmc-airlab/shucle-rider-ios.git",
+    "https://fake-user:fake-token@github.com/hkmc-airlab/shucle-rider-ios.git",
+    "ssh://git@github.com/hkmc-airlab/shucle-rider-ios.git",
+])
+def test_target_and_reference_are_relative_to_invocation(installer: Installer, remote: str):
+    target = installer.project.parent / "별도 작업 폴더"
+    target.mkdir()
+    repo = installer.project.parent / '참조 """ 레포\n두번째 줄'
+    init_reference_repo(repo, remote)
+    before = {p: p.read_bytes() for p in repo.rglob("*") if p.is_file()}
+    args = ("--target", "../" + target.name, "--repo", "../" + repo.name, "--local")
+
+    result = installer.run(*args)
+
+    assert result.returncode == 0, result.stderr
+    assert installed_reference(target) == {
+        "local_path": str(repo.resolve()), "repository": "hkmc-airlab/shucle-rider-ios",
+    }
+    assert not list(installer.project.iterdir())
+    assert before == {p: p.read_bytes() for p in repo.rglob("*") if p.is_file()}
+    assert str(target.resolve()) in result.stdout
+    state = json.loads(installer.claude_state.read_text())
+    assert set(state["cwds"]) == {str(target.resolve())}
+    for file in target.rglob("*"):
+        if file.is_file():
+            assert "fake-token" not in file.read_text()
+    assert "fake-token" not in result.stdout + result.stderr
+
+    files = {p: p.read_bytes() for p in target.rglob("*") if p.is_file()}
+    result = installer.run(*args)
+    assert result.returncode == 0, result.stderr
+    assert files == {p: p.read_bytes() for p in files}
+
+
+@pytest.mark.parametrize("remote, expected", [
+    (None, None),
+    ("https://git.example.com/team/project.git", None),
+    ("https://github.com/hkmc-airlab/shucle-rider-android.git", "hkmc-airlab/shucle-rider-android"),
+])
+def test_target_git_repo_is_default_reference(installer: Installer, remote, expected):
+    target = installer.project.parent / "reference"
+    init_reference_repo(target, remote)
+
+    result = installer.run("--target", str(target), "--local")
+
+    assert result.returncode == 0, result.stderr
+    assert installed_reference(target) == {"local_path": str(target.resolve()), "repository": expected}
+    assert not list(installer.project.iterdir())
+
+
+def test_reference_worktree(installer: Installer):
+    repo = installer.project.parent / "repo"
+    init_reference_repo(repo, "git@github.com:hkmc-airlab/shucle-rider-ios.git")
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=Installer Test", "-c",
+         "user.email=installer@example.invalid", "-c", "commit.gpgsign=false",
+         "commit", "--allow-empty", "-m", "fixture"],
+        check=True, capture_output=True,
+    )
+    worktree = installer.project.parent / "worktree"
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "--detach", str(worktree)],
+        check=True, capture_output=True,
+    )
+
+    result = installer.run("--repo", str(worktree), "--local")
+
+    assert result.returncode == 0, result.stderr
+    assert installed_reference(installer.project) == {
+        "local_path": str(worktree.resolve()), "repository": "hkmc-airlab/shucle-rider-ios",
+    }
+    assert not (worktree / ".claude").exists()
+    assert not (worktree / ".codex").exists()
+
+
+@pytest.mark.parametrize("args", [
+    ("--target",), ("--repo",), ("--target", "--local"), ("--repo", "--local"),
+    ("--target", "missing"), ("--repo", "missing"), ("--repo", "."),
+])
+def test_invalid_folder_arguments_leave_settings_untouched(installer: Installer, args):
+    before = installer.global_config.read_bytes()
+    state = installer.claude_state.read_bytes()
+
+    result = installer.run(*args)
+
+    assert result.returncode != 0
+    assert "오류:" in result.stderr
+    assert not list(installer.project.iterdir())
+    assert installer.global_config.read_bytes() == before
+    assert installer.claude_state.read_bytes() == state
+
+
+def test_piped_install_to_plain_folder(installer: Installer):
+    target = installer.project.parent / "plain folder"
+    target.mkdir()
+    result = subprocess.run(
+        ["/bin/bash", "-s", "--", "--target", str(target), "--local", "--update-agents"],
+        input=installer.script.read_text(), cwd=installer.project, env=installer.env,
+        text=True, capture_output=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (target / "AGENTS.md").exists()
+    agent = tomllib.loads((target / ".codex/agents/shuclientbot.toml").read_text())
+    assert '"local_path":' not in agent["developer_instructions"]
+    assert "기획·정책·Slack 질문은 로컬 레포 없이" in agent["developer_instructions"]
+    assert not list(installer.project.iterdir())
 
 
 if __name__ == "__main__":

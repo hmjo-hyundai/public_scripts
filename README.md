@@ -1,9 +1,9 @@
 # public_scripts
 
 Claude Code와 Codex에서 셔클라봇(ShuClientBot)을 사용하는 공개 설치 스크립트입니다.
-현재 버전은 **v6**입니다. 기본 설치는 `AGENTS.md`를 생성하거나 수정하지 않습니다.
+현재 버전은 **v8**입니다. 기본 설치는 `AGENTS.md`를 생성하거나 수정하지 않습니다.
 
-설치 실행 (shucle-rider-ios 폴더에서 실행 !!)
+설치 실행 (설정할 프로젝트 또는 일반 작업 폴더에서 실행)
 ```bash
 curl -fsSL https://raw.githubusercontent.com/hmjo-hyundai/public_scripts/main/setup-skills-and-mcp.sh | bash
 ```
@@ -38,7 +38,23 @@ bash /path/to/public_scripts/setup-skills-and-mcp.sh --url https://example.com/m
 
 # AGENTS.md에도 셔클라봇 위임 안내를 넣으려는 경우에만 지정
 bash /path/to/public_scripts/setup-skills-and-mcp.sh --update-agents
+
+# 다른 작업 폴더에 설치하고, 별도의 로컬 레포를 참조
+bash /path/to/public_scripts/setup-skills-and-mcp.sh \
+  --target "/path/to/work folder" --repo "/path/to/shucle-rider-ios"
 ```
+
+`--target`은 설정을 설치할 기존 폴더이며, 생략하면 현재 폴더입니다. `--repo`는
+코드 비교와 조회 저장소 식별에 사용할 로컬 Git 작업 폴더입니다. 생략하면 설치 폴더가
+속한 Git 레포를 사용하며, 일반 폴더에서는 참조 레포 없이 설치합니다. 상대 경로는 모두
+명령을 실행한 폴더 기준입니다. 없는 타겟 폴더나 잘못된 참조 레포는 설정 변경 전에 거부합니다.
+
+참조 레포의 절대 경로와 GitHub `origin`의 `owner/repository`만 Claude 에이전트·스킬과
+Codex 에이전트 지침에 기록합니다. remote의 인증 정보는 저장하지 않습니다. `origin`이 없거나
+GitHub 주소가 아니면 저장소 식별값은 `null`이며, GitHub 조회 시 호출자가 저장소를 확인합니다.
+호출자가 로컬 코드를 확인해 맥락을 전달하고 셔클라봇은 기존 RAG 서버에서 자료를 검색합니다.
+기획·정책·Slack 질문은 로컬 레포 없이도 검색합니다. 레포 자동 색인이나 파일 접근 권한은 추가하지 않습니다.
+재설치에도 같은 `--target`·`--repo`를 지정하세요. 생략하면 위 기본값으로 다시 설정합니다.
 
 현재 사용 중인 Mac Studio의 LAN 기본주소(`REMOTE_URL`)를 유지합니다. 해당 서버에 접근할 수
 있는 LAN에서 인자 없이 실행하면 됩니다. 다른 접속 주소는 `--url` 또는
@@ -70,6 +86,10 @@ curl -fsSL https://raw.githubusercontent.com/hmjo-hyundai/public_scripts/main/se
 
 # AGENTS.md 안내 블록도 갱신하는 선택 설치
 curl -fsSL https://raw.githubusercontent.com/hmjo-hyundai/public_scripts/main/setup-skills-and-mcp.sh | bash -s -- --update-agents
+
+# 설치 폴더와 참조 레포 분리
+curl -fsSL https://raw.githubusercontent.com/hmjo-hyundai/public_scripts/main/setup-skills-and-mcp.sh \
+  | bash -s -- --target "/path/to/work folder" --repo "/path/to/shucle-rider-ios"
 ```
 
 설치 과정에서 `uv run --no-project --with tomlkit==0.13.3 python`으로 TOML 편집 환경을
