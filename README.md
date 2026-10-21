@@ -1,7 +1,7 @@
 # public_scripts
 
 Claude Code와 Codex에서 셔클라봇(ShuClientBot)을 사용하는 공개 설치 스크립트입니다.
-현재 버전은 **v8**입니다. 기본 설치는 `AGENTS.md`를 생성하거나 수정하지 않습니다.
+현재 버전은 **v9**입니다. 기본 설치는 `AGENTS.md`를 생성하거나 수정하지 않습니다.
 
 설치 실행 (설정할 프로젝트 또는 일반 작업 폴더에서 실행)
 ```bash
@@ -62,6 +62,25 @@ GitHub 주소가 아니면 저장소 식별값은 `null`이며, GitHub 조회 �
 `--local`은 `http://127.0.0.1:8848/mcp`를 사용합니다.
 `--help`로 사용법과 버전을 확인할 수 있습니다. Tailscale 전용 주소·옵션은 포함하지 않습니다.
 
+### 기기별 수동 설정 없는 LAN 연결
+
+`.local`, `localhost`, 사설·루프백·링크 로컬 IP 주소에는 설치 스크립트가
+`mcp-proxy==0.13.0` 기반 stdio 연결을 자동으로 구성합니다. Claude Code와 Codex가
+이 연결 도구를 필요할 때 실행하며, 별도로 터미널을 열거나 SSH 터널을 유지하지 않습니다.
+MCP HTTP 요청을 보내는 자식 프로세스에서만 `NO_PROXY`와 `no_proxy`를 `*`로 설정합니다.
+사용자의 셸, 다른 MCP, 패키지 다운로드에 사용하는 프록시 설정은 변경하지 않습니다.
+공개 HTTP(S) 주소는 기존의 네이티브 HTTP 연결을 유지합니다.
+
+설치 시 uv 캐시에 연결 도구를 준비하고, 실제 호출에서는 `uv run --offline`으로 실행합니다.
+캐시를 삭제했거나 uv 실행 파일을 옮겼다면 설치 명령을 다시 실행하세요. 연결 도구 준비가
+실패하면 기존 MCP 설정을 변경하기 전에 중단합니다.
+
+클라이언트는 호스트 이름의 IPv4·IPv6 연결을 시도할 수 있지만, 서버가 해당 주소에서
+실제로 수신하고 있어야 합니다. IPv4 응답 경로가 막혀 있고 서버가 IPv4에서만 수신한다면
+클라이언트 설치만으로는 연결되지 않습니다. 서버 또는 네트워크 관리자가 한 번 IPv4 경로를
+복구하거나 IPv4·IPv6 동시 수신을 적용해야 합니다. IPv6 링크 로컬 주소는 같은 링크에서만
+사용 가능하며, `.local` 이름 해석도 클라이언트 네트워크에서 지원되어야 합니다.
+
 저장소를 clone하지 않고 인증 없이 내려받을 수도 있습니다. 아래 URL은 `main`의 최신 파일을
 가리킵니다. 다운로드한 파일을 검토한 뒤 실행하세요.
 
@@ -104,7 +123,7 @@ MCP 연결은 `shuclientbot` 서브에이전트 설정에 넣습니다. 메인 �
 
 | 대상 | 생성·갱신 내용 |
 |---|---|
-| Claude Code | `.claude/agents/shuclientbot.md`에 전용 `mcpServers`, `.claude/skills/shuclientbot/SKILL.md`에 호출 지침 |
+| Claude Code | `.claude/agents/shuclientbot.md`에 전용 `mcpServers` (LAN은 stdio, 공개 URL은 HTTP), `.claude/skills/shuclientbot/SKILL.md`에 호출 지침 |
 | Claude 권한 | `.claude/settings.local.json`의 기존 설정을 유지하며 `mcp__ShucleRiderRAG__*` 허용 추가 |
 | Codex | `.codex/agents/shuclientbot.toml`에 전용 MCP와 에이전트 지침 |
 | 공통 지침 (선택) | `--update-agents`를 지정할 때만 `AGENTS.md`의 `SHUCLIENTBOT_START`/`SHUCLIENTBOT_END` 관리 블록 갱신 |
@@ -123,8 +142,11 @@ MCP 연결은 `shuclientbot` 서브에이전트 설정에 넣습니다. 메인 �
   `.bak.<시각>.<프로세스 ID>` 백업을 만들고, 다른 설정·주석·파일 권한은 보존합니다.
   없는 메인 설정 파일은 새로 만들지 않습니다.
 
-사전 HTTP 도달 확인과 Codex MCP 초기 연결 제한시간은 3초입니다. 도달 확인이 실패해도
-설정 설치는 계속 진행하므로, 완료 메시지만으로 서버 연결 성공을 판단하지 마세요.
+사전 HTTP 도달 확인은 3초이며, LAN 주소는 검사에서도 프록시를 제외합니다.
+Codex MCP 초기 연결 제한시간은 공개 URL 3초, LAN stdio 연결 20초입니다.
+HTTP 초기화 응답이 200일 때만 도달 확인 성공으로 표시합니다. 연결 오류와 HTTP 오류는
+숨기지 않으며, 실패해도 설정은 설치하되 마지막에 **설정 설치 완료, MCP 연결 미확인**을
+표시합니다. 도달 확인은 HTTP 상태 검사이므로 설치 후 실제 도구 호출도 확인하세요.
 
 기존 TOML·Claude JSON은 변경 전에 검증합니다. AGENTS 관리 마커는 `--update-agents`를
 지정했을 때만 검증하므로, 기본 설치는 마커 상태에 영향을 받지 않습니다. 검증 대상 파일에
@@ -148,12 +170,16 @@ trust가 필요합니다. [Claude 공식 문서](https://code.claude.com/docs/en
 
 ```bash
 uv run tests/test_setup_installer.py -q
+uv run tests/test_mcp_connection.py -q
 bash -n setup-skills-and-mcp.sh
 ```
 
 테스트는 임시 디렉터리와 CLI 대역을 사용합니다. 실제 사용자 설정이나 MCP 서버를 건드리지
 않으며, TOML 보존, 오류 시 원본 유지, 재실행, Claude scope와 삭제 오류, 전용 MCP 설정,
 PR 조회 지침, URL 인코딩, Tailscale 전용 주소 제외, 파이프 설치, AGENTS 기본 보존과 선택 갱신을 확인합니다.
+`test_mcp_connection.py`는 임시 서버에서 IPv4·IPv6 초기화와 도구 호출을 수행하며,
+잘못된 프록시 환경 변수에서도 생성된 MCP 실행 코드가 정상 연결하는지 검증합니다.
+이 테스트에는 로컬 소켓 사용 권한과 IPv4·IPv6 동시 수신 지원이 필요합니다.
 
 ## 권장 배포·업데이트 운영
 

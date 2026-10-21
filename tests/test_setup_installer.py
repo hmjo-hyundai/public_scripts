@@ -60,15 +60,22 @@ def installer(tmp_path: Path) -> Installer:
     uv.write_text(
         f"#!{sys.executable}\n"
         "import os, sys\n"
+        "if sys.argv[1:6] == ['run', '--no-project', '--with', 'mcp-proxy==0.13.0', 'python']:\n"
+        "    assert sys.argv[6:] == ['-c', 'import mcp_proxy']\n"
+        "    sys.exit(1 if os.environ.get('SETUP_TEST_BRIDGE_FAILURE') else 0)\n"
         "assert sys.argv[1:6] == ['run', '--no-project', '--with', 'tomlkit==0.13.3', 'python']\n"
         "os.execv(sys.executable, [sys.executable, *sys.argv[6:]])\n"
     )
     uv.chmod(0o755)
     curl = bin_dir / "curl"
     curl.write_text(
-        '#!/bin/bash\n'
-        '[ "$2" = "--max-time" ] && [ "$3" = "3" ] || exit 2\n'
-        'printf "initialize -> HTTP 200 (mock)\\n"\n'
+        f'#!{sys.executable}\n'
+        'import json,os,sys\n'
+        'from pathlib import Path\n'
+        'assert sys.argv[1:4] == ["-sS", "--max-time", "3"]\n'
+        'Path(os.environ["SETUP_TEST_CURL_ARGS"]).write_text(json.dumps(sys.argv[1:]))\n'
+        'print(os.environ.get("SETUP_TEST_HTTP_STATUS", "200"), end="")\n'
+        'sys.exit(int(os.environ.get("SETUP_TEST_CURL_EXIT", "0")))\n'
     )
     curl.chmod(0o755)
     claude_state = tmp_path / "claude-state.json"
@@ -104,8 +111,13 @@ def installer(tmp_path: Path) -> Installer:
     env = os.environ.copy()
     env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
     env["SETUP_TEST_CLAUDE_STATE"] = str(claude_state)
+    env["SETUP_TEST_CURL_ARGS"] = str(tmp_path / "curl-args.json")
     env.pop("SHUCLIENTBOT_MCP_URL", None)
     return Installer(project, global_config, script, claude_state, env)
+
+
+def mcp_target(server: dict) -> str:
+    return server["url"] if "url" in server else server["args"][-1]
 
 
 @pytest.mark.parametrize("header", [
@@ -210,16 +222,20 @@ def test_agents_keep_scoped_mcp_and_current_tools(installer: Installer):
     assert {t.strip() for t in agent["tools"].split(",")} == {
         f"mcp__{SERVER}__{name}" for name in TOOLS
     }
-    assert agent["mcpServers"] == [{SERVER: {"type": "http", "url": url}}]
+    claude_server = agent["mcpServers"][0][SERVER]
+    assert claude_server["type"] == "stdio"
+    assert mcp_target(claude_server) == url
     assert "repository" in body and "lookup_pull_requests" in body
     codex = tomllib.loads((installer.project / ".codex/agents/shuclientbot.toml").read_text())
     assert codex["name"] == "shuclientbot"
     assert "lookup_pull_requests" in codex["developer_instructions"]
     assert "repository" in codex["developer_instructions"]
-    assert codex["mcp_servers"][SERVER] == {
-        "url": url, "enabled": True, "startup_timeout_sec": 3,
-        "default_tools_approval_mode": "approve",
-    }
+    codex_server = codex["mcp_servers"][SERVER]
+    assert codex_server["command"] == claude_server["command"]
+    assert codex_server["args"] == claude_server["args"]
+    assert codex_server["enabled"] is True
+    assert codex_server["startup_timeout_sec"] == 20
+    assert codex_server["default_tools_approval_mode"] == "approve"
     skill = (installer.project / ".claude/skills/shuclientbot/SKILL.md").read_text()
     assert "lookup_pull_requests" in skill and "서브에이전트(Agent)" in skill
     assert not (installer.project / "AGENTS.md").exists()
@@ -281,14 +297,95 @@ def test_environment_url_and_cli_precedence(installer: Installer, args: tuple[st
     result = installer.run(*args)
     assert result.returncode == 0, result.stderr
     agent = tomllib.loads((installer.project / ".codex/agents/shuclientbot.toml").read_text())
-    assert agent["mcp_servers"][SERVER]["url"] == expected
+    assert mcp_target(agent["mcp_servers"][SERVER]) == expected
 
 
 def test_lan_default_is_preserved(installer: Installer):
     result = installer.run()
     assert result.returncode == 0, result.stderr
     agent = tomllib.loads((installer.project / ".codex/agents/shuclientbot.toml").read_text())
-    assert agent["mcp_servers"][SERVER]["url"] == "http://HMC123ui-Mac-Studio.local:8848/mcp"
+    assert mcp_target(agent["mcp_servers"][SERVER]) == "http://HMC123ui-Mac-Studio.local:8848/mcp"
+
+
+@pytest.mark.parametrize("url", [
+    "http://Mac-Studio.LOCAL.:8848/mcp", "http://localhost:8848/mcp",
+    "http://127.0.0.1:8848/mcp", "http://10.20.30.40:8848/mcp",
+    "http://[::1]:8848/mcp", "http://[fe80::1234%25wlan0]:8848/mcp",
+])
+def test_lan_connections_bypass_proxy_at_check_and_runtime(installer: Installer, url: str):
+    installer.env["HTTP_PROXY"] = "http://proxy.example:8080"
+    installer.env["NO_PROXY"] = "keep.example"
+    result = installer.run("--url", url)
+    assert result.returncode == 0, result.stderr
+    codex = tomllib.loads((installer.project / ".codex/agents/shuclientbot.toml").read_text())
+    server = codex["mcp_servers"][SERVER]
+    args = server["args"]
+    assert args[:5] == ["run", "--offline", "--no-project", "--with", "mcp-proxy==0.13.0"]
+    assert Path(server["command"]).is_absolute()
+    assert mcp_target(server) == url
+    curl = json.loads(Path(installer.env["SETUP_TEST_CURL_ARGS"]).read_text())
+    assert curl[curl.index("--noproxy") + 1] == "*"
+    # Execute the generated child code with runpy replaced: no real server access.
+    code = args[args.index("-c") + 1]
+    probe = (
+        "import os,json,runpy; "
+        "runpy.run_module=lambda *a,**k: print(json.dumps({n:os.environ.get(n) "
+        "for n in ('HTTP_PROXY','NO_PROXY','no_proxy')})); " + code
+    )
+    child = subprocess.run([sys.executable, "-c", probe], env=installer.env,
+                           capture_output=True, text=True, check=True)
+    assert json.loads(child.stdout) == {
+        "HTTP_PROXY": "http://proxy.example:8080", "NO_PROXY": "*", "no_proxy": "*",
+    }
+    assert installer.env["NO_PROXY"] == "keep.example"
+
+
+def test_public_https_keeps_native_http_transport_and_proxy(installer: Installer):
+    url = "https://mcp.example.com/mcp"
+    installer.env["SETUP_TEST_BRIDGE_FAILURE"] = "1"
+    result = installer.run("--url", url)
+    assert result.returncode == 0, result.stderr
+    agent = tomllib.loads((installer.project / ".codex/agents/shuclientbot.toml").read_text())
+    assert agent["mcp_servers"][SERVER] == {
+        "url": url, "enabled": True, "startup_timeout_sec": 3,
+        "default_tools_approval_mode": "approve",
+    }
+    curl = json.loads(Path(installer.env["SETUP_TEST_CURL_ARGS"]).read_text())
+    assert "--noproxy" not in curl
+
+
+def test_bridge_dependency_failure_does_not_change_configuration(installer: Installer):
+    installer.env["SETUP_TEST_BRIDGE_FAILURE"] = "1"
+    before = installer.global_config.read_bytes()
+    state = installer.claude_state.read_bytes()
+    result = installer.run()
+    assert result.returncode != 0
+    assert "MCP 연결 도구 준비 실패" in result.stderr
+    assert installer.global_config.read_bytes() == before
+    assert installer.claude_state.read_bytes() == state
+    assert not list(installer.project.iterdir())
+
+
+@pytest.mark.parametrize("status, exit_code", [("000", "28"), ("403", "0"), ("500", "0")])
+def test_unreachable_mcp_is_not_reported_as_connected(installer: Installer, status, exit_code):
+    installer.env["SETUP_TEST_HTTP_STATUS"] = status
+    installer.env["SETUP_TEST_CURL_EXIT"] = exit_code
+    result = installer.run()
+    assert result.returncode == 0, result.stderr
+    assert "설정 설치 완료, MCP 연결 미확인" in result.stdout
+    assert "✅ 완료" not in result.stdout
+    assert (installer.project / ".codex/agents/shuclientbot.toml").exists()
+
+
+@pytest.mark.parametrize("url", ["file:///tmp/mcp", "http://", "http://localhost:wrong/mcp"])
+def test_invalid_url_does_not_change_settings(installer: Installer, url: str):
+    before = installer.global_config.read_bytes()
+    state = installer.claude_state.read_bytes()
+    result = installer.run("--url", url)
+    assert result.returncode != 0
+    assert installer.global_config.read_bytes() == before
+    assert installer.claude_state.read_bytes() == state
+    assert not list(installer.project.iterdir())
 
 
 @pytest.mark.parametrize("update_agents", [False, True])

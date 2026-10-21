@@ -11,11 +11,16 @@ set -euo pipefail
 # =============================================================
 
 # 이 파일을 수정할 때마다 SCRIPT_VERSION을 1씩 올린다.
-SCRIPT_VERSION=8
+SCRIPT_VERSION=9
 
 REMOTE_URL="http://HMC123ui-Mac-Studio.local:8848/mcp"
 LOCAL_URL="http://127.0.0.1:8848/mcp"
 MCP_STARTUP_TIMEOUT_SEC=3
+MCP_CHECK_TIMEOUT_SEC=3
+MCP_BRIDGE_PACKAGE="mcp-proxy==0.13.0"
+MCP_CONNECTION_JSON="{}"
+MCP_CURL_OPTIONS=()
+MCP_REACHABLE=false
 UPDATE_AGENTS_MD=false
 INSTALL_TARGET="$PWD"
 REFERENCE_REPO=""
@@ -72,11 +77,96 @@ run_setup_python() {
   uv run --no-project --with tomlkit==0.13.3 python "$@"
 }
 
+prepare_mcp_connection() {
+  local direct_lan
+  direct_lan="$(run_setup_python - "$URL" <<'PY'
+import ipaddress
+import sys
+from urllib.parse import urlsplit
+
+try:
+    parsed = urlsplit(sys.argv[1])
+    host = (parsed.hostname or "").rstrip(".").lower()
+    if parsed.scheme not in ("http", "https") or not host:
+        raise ValueError("MCP URL은 http:// 또는 https:// 주소여야 합니다")
+    # Validate the port as well, before any consumer configuration is changed.
+    parsed.port
+    local = host == "localhost" or host.endswith((".local", ".localhost"))
+    try:
+        address = ipaddress.ip_address(host.split("%", 1)[0])
+        local = local or address.is_private or address.is_link_local or address.is_loopback
+    except ValueError:
+        pass
+    print("true" if local else "false")
+except ValueError as exc:
+    print(f"오류: {exc}", file=sys.stderr)
+    sys.exit(1)
+PY
+  )" || die "MCP URL 검증 실패"
+
+  if [ "$direct_lan" = true ]; then
+    # uv may need the user's proxy to download packages. Only the child MCP
+    # process bypasses proxies; the shell, other MCPs, and uv keep their settings.
+    echo "  -> LAN MCP 전용 연결 도구 준비 ($MCP_BRIDGE_PACKAGE)"
+    uv run --no-project --with "$MCP_BRIDGE_PACKAGE" python -c 'import mcp_proxy' \
+      || die "MCP 연결 도구 준비 실패 (기존 MCP 설정은 변경하지 않았습니다)"
+    MCP_STARTUP_TIMEOUT_SEC=20
+    MCP_CURL_OPTIONS=(--noproxy '*')
+    MCP_CONNECTION_JSON="$(run_setup_python - "$URL" "$(command -v uv)" "$MCP_BRIDGE_PACKAGE" <<'PY'
+import json
+import os
+import sys
+
+url, uv, package = sys.argv[1:]
+code = (
+    "import os,runpy; "
+    "os.environ['NO_PROXY']=os.environ['no_proxy']='*'; "
+    "runpy.run_module('mcp_proxy',run_name='__main__')"
+)
+print(json.dumps({
+    "command": os.path.abspath(uv),
+    "args": ["run", "--offline", "--no-project", "--with", package,
+             "python", "-c", code, "--transport", "streamablehttp",
+             "--log-level", "WARNING", url],
+}))
+PY
+    )" || die "LAN MCP 설정 생성 실패"
+  else
+    MCP_CONNECTION_JSON="$(run_setup_python -c 'import json,sys; print(json.dumps({"url":sys.argv[1]}))' "$URL")"
+  fi
+}
+
+check_mcp_connection() {
+  local status
+  echo "############ 0) MCP 서버 도달 확인 ############"
+  echo "mode=$MODE"
+  echo "url=$URL"
+  if status="$(curl -sS --max-time "$MCP_CHECK_TIMEOUT_SEC" "${MCP_CURL_OPTIONS[@]}" \
+    -o /dev/null -w '%{http_code}' -X POST \
+    -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"shuclientbot-setup","version":"9"}}}' \
+    "$URL")"; then
+    echo "initialize -> HTTP $status (200 이면 OK)"
+    if [ "$status" = 200 ]; then
+      MCP_REACHABLE=true
+      return
+    fi
+  else
+    echo "initialize -> HTTP ${status:-000}"
+  fi
+  echo "경고: MCP 연결 미확인. 설정 설치는 계속하지만 연결 성공을 뜻하지 않습니다."
+  echo "  서버의 IPv4/IPv6 수신 주소와 네트워크 경로를 확인하세요."
+  if [ "${#MCP_CURL_OPTIONS[@]}" -gt 0 ]; then
+    echo "  LAN 주소는 프록시를 제외하고 검사했으며, 실제 MCP 호출에도 동일하게 적용합니다."
+  fi
+}
+
 edit_codex_mcp_config() {
-  run_setup_python - "$1" "$URL" "$2" "${3:-write}" "$MCP_STARTUP_TIMEOUT_SEC" <<'CODEX_CONFIG_PY'
+  run_setup_python - "$1" "$URL" "$2" "${3:-write}" "$MCP_STARTUP_TIMEOUT_SEC" "$MCP_CONNECTION_JSON" <<'CODEX_CONFIG_PY'
 from collections.abc import MutableMapping
 from datetime import datetime
 import os
+import json
 from pathlib import Path
 import shutil
 import stat
@@ -86,7 +176,7 @@ import tempfile
 import tomlkit
 
 path = Path(sys.argv[1]).resolve()
-url, operation, mode, timeout = sys.argv[2:]
+url, operation, mode, timeout, connection = sys.argv[2:]
 temporary = None
 try:
     original = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -104,8 +194,9 @@ try:
     elif operation == "agent":
         servers = config.setdefault("mcp_servers", tomlkit.table())
         server = tomlkit.table()
+        server.update(json.loads(connection))
         server.update(
-            url=url, enabled=True, startup_timeout_sec=int(timeout),
+            enabled=True, startup_timeout_sec=int(timeout),
             default_tools_approval_mode="approve",
         )
         servers["ShucleRiderRAG"] = server
@@ -345,6 +436,7 @@ usage() {
   echo "  --url MCP_URL  직접 지정한 MCP URL에 연결"
   echo "  --update-agents  AGENTS.md의 셔클라봇 안내 블록도 생성/갱신 (기본: 변경 안 함)"
   echo "  SHUCLIENTBOT_MCP_URL 환경 변수로도 MCP URL을 지정할 수 있습니다."
+  echo "  LAN 주소는 전용 stdio 연결 도구를 자동 구성해 MCP 호출에서만 프록시를 제외합니다."
 }
 
 while [ "$#" -gt 0 ]; do
@@ -413,16 +505,17 @@ edit_codex_mcp_config "$PROJECT_CODEX_CONFIG" remove check
 if command -v claude >/dev/null 2>&1; then
   update_claude_permissions check
 fi
-# A JSON string is also a quoted YAML scalar, including quotes and newlines.
-URL_JSON="$(run_setup_python -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$URL")"
+prepare_mcp_connection
+CLAUDE_MCP_JSON="$(run_setup_python - "$MCP_CONNECTION_JSON" <<'PY'
+import json
+import sys
 
-echo "############ 0) MCP 서버 도달 확인 ############"
-echo "mode=$MODE"
-echo "url=$URL"
-curl -s --max-time "$MCP_STARTUP_TIMEOUT_SEC" -o /dev/null -w 'initialize -> HTTP %{http_code}  (200 이면 OK)\n' -X POST \
-  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"p","version":"0"}}}' \
-  "$URL" || echo "  (도달 실패 -> 서버 실행 상태/URL/방화벽 확인. 설치는 계속 진행)"
+server = json.loads(sys.argv[1])
+server["type"] = "stdio" if "command" in server else "http"
+print(json.dumps([{"ShucleRiderRAG": server}]))
+PY
+)"
+check_mcp_connection
 
 echo
 echo "############ 1) Claude Code (서브에이전트 전용 MCP + 스킬) ############"
@@ -440,10 +533,7 @@ name: shuclientbot
 description: shucle-rider-ios와 shucle-rider-android 앱 개발을 지원하며, 기획 문서·GitHub 이슈(ShucleRiderRAG)에서 구현 스펙/요구사항을 확인해 근거 있는 답만 돌려준다. "스펙에 뭐라고 돼 있지?", "이 구현이 요구사항과 맞나?" 류 질문에 사용. 검색 청크는 이 서브에이전트 안에 격리되고 호출자에겐 답+출처만 반환된다.
 tools: mcp__ShucleRiderRAG__agent_handshake, mcp__ShucleRiderRAG__lookup_issues, mcp__ShucleRiderRAG__lookup_pull_requests, mcp__ShucleRiderRAG__filter_issues, mcp__ShucleRiderRAG__expand_epic, mcp__ShucleRiderRAG__search_docs, mcp__ShucleRiderRAG__report_outcome
 model: inherit
-mcpServers:
-  - ShucleRiderRAG:
-      type: http
-      url: $URL_JSON
+mcpServers: $CLAUDE_MCP_JSON
 ---
 CLAUDE_AGENT_HEADER_EOF
     cat <<'CLAUDE_AGENT_BODY_EOF'
@@ -564,4 +654,8 @@ fi
 echo
 write_reference_context
 
-echo "✅ 완료. Claude Code / Codex 재시작 후  '셔클라봇으로 ~ 확인해줘' 로 테스트."
+if [ "$MCP_REACHABLE" = true ]; then
+  echo "✅ 완료. MCP 초기화 HTTP 200 확인. Claude Code / Codex 재시작 후 '셔클라봇으로 ~ 확인해줘' 로 테스트."
+else
+  echo "⚠️ 설정 설치 완료, MCP 연결 미확인. 서버 연결을 복구한 뒤 다시 설치하거나 Claude Code / Codex를 재시작하세요."
+fi
