@@ -120,12 +120,17 @@ def mcp_target(server: dict) -> str:
     return server["url"] if "url" in server else server["args"][-1]
 
 
+def installed_codex_mcp(project: Path) -> dict:
+    # Custom agent files do not register MCP servers. Codex loads them here.
+    return tomllib.loads((project / ".codex/config.toml").read_text())["mcp_servers"][SERVER]
+
+
 @pytest.mark.parametrize("header", [
     "[mcp_servers.ShucleRiderRAG]",
     '[mcp_servers."ShucleRiderRAG"]',
     "  [ mcp_servers . 'ShucleRiderRAG' ]",
 ])
-def test_main_mcp_cleanup_preserves_other_settings(installer: Installer, header: str):
+def test_project_mcp_migration_preserves_other_settings(installer: Installer, header: str):
     original = (
         '# Keep this comment\nmodel = "keep"\n'
         'developer_instructions = """\nExample:\n'
@@ -148,7 +153,14 @@ def test_main_mcp_cleanup_preserves_other_settings(installer: Installer, header:
         config = tomllib.loads(path.read_text())
         assert config["model"] == expected["model"]
         assert config["developer_instructions"] == expected["developer_instructions"]
-        assert config["mcp_servers"] == {"other": expected["mcp_servers"]["other"]}
+        assert config["mcp_servers"]["other"] == expected["mcp_servers"]["other"]
+        assert "agentrag" not in config["mcp_servers"]
+        if path == local:
+            assert set(config["mcp_servers"]) == {"other", SERVER}
+            assert mcp_target(config["mcp_servers"][SERVER]) == "http://127.0.0.1:8848/mcp"
+            assert "http_headers" not in config["mcp_servers"][SERVER]
+        else:
+            assert set(config["mcp_servers"]) == {"other"}
         assert "# Keep this comment" in path.read_text()
         assert any(p.read_text() == original for p in path.parent.glob("config.toml.bak.*"))
     assert installer.global_config.stat().st_mode & 0o777 == 0o640
@@ -165,11 +177,13 @@ def test_reinstall_preserves_rules_permissions_and_claude_scopes(installer: Inst
     original_state = json.loads(installer.claude_state.read_text())
     first = installer.run("--local", "--update-agents")
     assert first.returncode == 0, first.stderr
-    paths = [agents, settings, installer.global_config]
+    paths = [agents, settings, installer.global_config, installer.project / ".codex/config.toml"]
     before = {path: path.read_bytes() for path in paths}
+    backups = list(installer.project.rglob("*.bak.*"))
     second = installer.run("--local", "--update-agents")
     assert second.returncode == 0, second.stderr
     assert before == {path: path.read_bytes() for path in paths}
+    assert backups == list(installer.project.rglob("*.bak.*"))
     assert "Keep before." in agents.read_text() and "Keep after." in agents.read_text()
     assert "Old" not in agents.read_text()
     assert agents.read_text().count(START) == agents.read_text().count(END) == 1
@@ -182,7 +196,7 @@ def test_reinstall_preserves_rules_permissions_and_claude_scopes(installer: Inst
     assert state["user"] == original_state["user"]
     assert state["project"] == original_state["project"]
     assert state["local"] == {}
-    assert not (installer.project / ".codex/config.toml").exists()
+    assert installed_codex_mcp(installer.project)["enabled"] is True
 
 
 @pytest.mark.parametrize("invalid_file, content", [
@@ -211,7 +225,7 @@ def test_preflight_failure_preserves_files(installer: Installer, invalid_file: s
     assert not list(installer.global_config.parent.glob("*.bak.*"))
 
 
-def test_agents_keep_scoped_mcp_and_current_tools(installer: Installer):
+def test_claude_scoped_and_codex_inherited_mcp_with_current_tools(installer: Installer):
     url = 'http://localhost:8848/mcp?value="quoted"'
     result = installer.run("--url", url)
     assert result.returncode == 0, result.stderr
@@ -230,7 +244,8 @@ def test_agents_keep_scoped_mcp_and_current_tools(installer: Installer):
     assert codex["name"] == "shuclientbot"
     assert "lookup_pull_requests" in codex["developer_instructions"]
     assert "repository" in codex["developer_instructions"]
-    codex_server = codex["mcp_servers"][SERVER]
+    assert "mcp_servers" not in codex
+    codex_server = installed_codex_mcp(installer.project)
     assert codex_server["command"] == claude_server["command"]
     assert codex_server["args"] == claude_server["args"]
     assert codex_server["enabled"] is True
@@ -246,9 +261,22 @@ def test_missing_global_config_is_not_created(installer: Installer):
     result = installer.run("--local")
     assert result.returncode == 0, result.stderr
     assert not installer.global_config.exists()
-    assert not (installer.project / ".codex/config.toml").exists()
+    assert installed_codex_mcp(installer.project)["enabled"] is True
     assert (installer.project / ".codex/agents/shuclientbot.toml").exists()
     assert not (installer.project / "AGENTS.md").exists()
+
+
+def test_v9_agent_only_install_is_migrated_to_parent_config(installer: Installer):
+    agent = installer.project / ".codex/agents/shuclientbot.toml"
+    agent.parent.mkdir(parents=True)
+    agent.write_text(
+        'name = "shuclientbot"\ndescription = "old"\ndeveloper_instructions = "old"\n'
+        '[mcp_servers.ShucleRiderRAG]\nurl = "http://old.local:8848/mcp"\n'
+    )
+    result = installer.run()
+    assert result.returncode == 0, result.stderr
+    assert "mcp_servers" not in tomllib.loads(agent.read_text())
+    assert mcp_target(installed_codex_mcp(installer.project)) == "http://HMC123ui-Mac-Studio.local:8848/mcp"
 
 
 def test_claude_removal_errors_are_not_ignored(installer: Installer):
@@ -296,15 +324,13 @@ def test_environment_url_and_cli_precedence(installer: Installer, args: tuple[st
     installer.env["SHUCLIENTBOT_MCP_URL"] = "http://configured.example/mcp"
     result = installer.run(*args)
     assert result.returncode == 0, result.stderr
-    agent = tomllib.loads((installer.project / ".codex/agents/shuclientbot.toml").read_text())
-    assert mcp_target(agent["mcp_servers"][SERVER]) == expected
+    assert mcp_target(installed_codex_mcp(installer.project)) == expected
 
 
 def test_lan_default_is_preserved(installer: Installer):
     result = installer.run()
     assert result.returncode == 0, result.stderr
-    agent = tomllib.loads((installer.project / ".codex/agents/shuclientbot.toml").read_text())
-    assert mcp_target(agent["mcp_servers"][SERVER]) == "http://HMC123ui-Mac-Studio.local:8848/mcp"
+    assert mcp_target(installed_codex_mcp(installer.project)) == "http://HMC123ui-Mac-Studio.local:8848/mcp"
 
 
 @pytest.mark.parametrize("url", [
@@ -317,8 +343,7 @@ def test_lan_connections_bypass_proxy_at_check_and_runtime(installer: Installer,
     installer.env["NO_PROXY"] = "keep.example"
     result = installer.run("--url", url)
     assert result.returncode == 0, result.stderr
-    codex = tomllib.loads((installer.project / ".codex/agents/shuclientbot.toml").read_text())
-    server = codex["mcp_servers"][SERVER]
+    server = installed_codex_mcp(installer.project)
     args = server["args"]
     assert args[:5] == ["run", "--offline", "--no-project", "--with", "mcp-proxy==0.13.0"]
     assert Path(server["command"]).is_absolute()
@@ -345,8 +370,7 @@ def test_public_https_keeps_native_http_transport_and_proxy(installer: Installer
     installer.env["SETUP_TEST_BRIDGE_FAILURE"] = "1"
     result = installer.run("--url", url)
     assert result.returncode == 0, result.stderr
-    agent = tomllib.loads((installer.project / ".codex/agents/shuclientbot.toml").read_text())
-    assert agent["mcp_servers"][SERVER] == {
+    assert installed_codex_mcp(installer.project) == {
         "url": url, "enabled": True, "startup_timeout_sec": 3,
         "default_tools_approval_mode": "approve",
     }

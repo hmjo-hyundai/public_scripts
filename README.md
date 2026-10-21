@@ -1,7 +1,7 @@
 # public_scripts
 
 Claude Code와 Codex에서 셔클라봇(ShuClientBot)을 사용하는 공개 설치 스크립트입니다.
-현재 버전은 **v9**입니다. 기본 설치는 `AGENTS.md`를 생성하거나 수정하지 않습니다.
+현재 버전은 **v10**입니다. 기본 설치는 `AGENTS.md`를 생성하거나 수정하지 않습니다.
 
 설치 실행 (설정할 프로젝트 또는 일반 작업 폴더에서 실행)
 ```bash
@@ -17,7 +17,7 @@ curl -fsSL https://raw.githubusercontent.com/hmjo-hyundai/public_scripts/main/se
 
 설치 스크립트의 기준본은 이 저장소의 `setup-skills-and-mcp.sh`입니다. 비공개 저장소는
 서버 구현과 데이터소스·내부 문서를 관리합니다. 비공개 저장소의 같은 이름 파일을 이 파일에
-덮어쓰는 방식으로 동기화하지 않습니다. 공개본의 서브에이전트 전용 연결과 제한시간 설정이
+덮어쓰는 방식으로 동기화하지 않습니다. 공개본의 클라이언트별 MCP 연결과 제한시간 설정이
 사라질 수 있기 때문입니다. 서버의 도구 계약이 바뀌면 필요한 설치 지침만 여기에서 수정하고
 회귀 테스트를 함께 갱신합니다.
 
@@ -117,15 +117,17 @@ curl -fsSL https://raw.githubusercontent.com/hmjo-hyundai/public_scripts/main/se
 
 ## 설치 동작
 
-MCP 연결은 `shuclientbot` 서브에이전트 설정에 넣습니다. 메인 세션은 질문을 위임하고
-답과 출처를 받습니다. PR 조회 도구인 `lookup_pull_requests`와 저장소를 지정하는
-`repository` 지침도 포함합니다.
+Claude는 `shuclientbot` 서브에이전트에 MCP를 직접 연결합니다. Codex는 프로젝트의
+`.codex/config.toml`에 MCP를 등록하고, 셔클라봇이 부모 세션에서 상속합니다. Codex의
+에이전트 파일에 넣은 `mcp_servers`는 적용되지 않습니다. 따라서 Codex 메인 세션에도
+도구가 표시되며, 검색 작업은 셔클라봇에 위임해 답과 출처만 받습니다. PR 조회 도구인
+`lookup_pull_requests`와 저장소를 지정하는 `repository` 지침도 포함합니다.
 
 | 대상 | 생성·갱신 내용 |
 |---|---|
 | Claude Code | `.claude/agents/shuclientbot.md`에 전용 `mcpServers` (LAN은 stdio, 공개 URL은 HTTP), `.claude/skills/shuclientbot/SKILL.md`에 호출 지침 |
 | Claude 권한 | `.claude/settings.local.json`의 기존 설정을 유지하며 `mcp__ShucleRiderRAG__*` 허용 추가 |
-| Codex | `.codex/agents/shuclientbot.toml`에 전용 MCP와 에이전트 지침 |
+| Codex | `.codex/config.toml`에 프로젝트 MCP, `.codex/agents/shuclientbot.toml`에 에이전트 지침 |
 | 공통 지침 (선택) | `--update-agents`를 지정할 때만 `AGENTS.md`의 `SHUCLIENTBOT_START`/`SHUCLIENTBOT_END` 관리 블록 갱신 |
 
 기본 실행에서는 기존 `AGENTS.md`를 그대로 두며, 파일이 없으면 새로 만들지 않습니다.
@@ -137,16 +139,21 @@ MCP 연결은 `shuclientbot` 서브에이전트 설정에 넣습니다. 메인 �
 - Claude: 현재 프로젝트의 **local** scope에 있는 `agentrag`·`ShucleRiderRAG`만 삭제합니다.
   `user`·`project` scope 등록은 보존합니다. 해당 범위에도 등록되어 있다면 메인 세션에
   MCP가 계속 표시될 수 있습니다. 등록이 없는 경우는 정상 처리하고, 다른 삭제 오류는 중단합니다.
-- Codex: 사용자 설정(`$CODEX_HOME/config.toml`, 기본 `~/.codex/config.toml`)과
-  `.codex/config.toml`에서 두 이름의 MCP 등록만 제거합니다. 실제로 변경하는 파일마다
+- Codex: 사용자 설정(`$CODEX_HOME/config.toml`, 기본 `~/.codex/config.toml`)에서
+  두 이름의 중복 등록을 제거합니다. `.codex/config.toml`에서는 `agentrag`를 제거하고
+  `ShucleRiderRAG`를 등록·갱신합니다. 실제로 변경하는 기존 설정 파일마다
   `.bak.<시각>.<프로세스 ID>` 백업을 만들고, 다른 설정·주석·파일 권한은 보존합니다.
-  없는 메인 설정 파일은 새로 만들지 않습니다.
+  없는 사용자 설정 파일은 만들지 않으며, 프로젝트 설정 파일은 필요하면 생성합니다.
 
 사전 HTTP 도달 확인은 3초이며, LAN 주소는 검사에서도 프록시를 제외합니다.
 Codex MCP 초기 연결 제한시간은 공개 URL 3초, LAN stdio 연결 20초입니다.
 HTTP 초기화 응답이 200일 때만 도달 확인 성공으로 표시합니다. 연결 오류와 HTTP 오류는
 숨기지 않으며, 실패해도 설정은 설치하되 마지막에 **설정 설치 완료, MCP 연결 미확인**을
 표시합니다. 도달 확인은 HTTP 상태 검사이므로 설치 후 실제 도구 호출도 확인하세요.
+
+v9 이하에서 Codex 에이전트만 등록되고 MCP 도구가 없던 경우, 이 설치 스크립트를 다시
+실행하고 Codex를 재시작해 새 세션에서 확인하세요. MCP 연결을 프로젝트 설정으로 옮기며,
+기존 에이전트 파일의 적용되지 않는 MCP 설정은 제거합니다. 서버 재시작은 필요 없습니다.
 
 기존 TOML·Claude JSON은 변경 전에 검증합니다. AGENTS 관리 마커는 `--update-agents`를
 지정했을 때만 검증하므로, 기본 설치는 마커 상태에 영향을 받지 않습니다. 검증 대상 파일에
@@ -155,7 +162,9 @@ HTTP 초기화 응답이 200일 때만 도달 확인 성공으로 표시합니�
 
 ## 사용 확인
 
-Claude Code 또는 Codex를 재시작하고 다음과 같이 요청합니다.
+Codex에서는 신뢰한 프로젝트 폴더에서 `codex mcp get ShucleRiderRAG --json`으로
+부모 세션이 읽는 MCP 등록을 확인할 수 있습니다. 이 명령은 설정 확인이므로 실제 연결
+검사를 대신하지 않습니다. Claude Code 또는 Codex를 재시작해 새 세션에서 다음과 같이 요청합니다.
 
 > 셔클라봇으로 이 기능의 요구사항을 확인해줘.
 

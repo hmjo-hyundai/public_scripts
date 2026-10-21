@@ -6,12 +6,12 @@ set -euo pipefail
 # 실행: 작업 프로젝트 폴더에서  ->  bash /path/to/public_scripts/setup-skills-and-mcp.sh [--local]
 #       파일 내용을 검토한 뒤 실행한다.
 # 효과: Claude Code / Codex 양쪽에 셔클라봇 서브에이전트를 등록하고
-#       ShucleRiderRAG MCP(http)는 해당 서브에이전트에서만 연결한다.
+#       Claude는 전용 MCP, Codex는 프로젝트 MCP를 상속해 연결한다.
 # 기본은 A(Mac Studio) 원격 URL, --local은 http://127.0.0.1:8848/mcp.
 # =============================================================
 
 # 이 파일을 수정할 때마다 SCRIPT_VERSION을 1씩 올린다.
-SCRIPT_VERSION=9
+SCRIPT_VERSION=10
 
 REMOTE_URL="http://HMC123ui-Mac-Studio.local:8848/mcp"
 LOCAL_URL="http://127.0.0.1:8848/mcp"
@@ -57,13 +57,13 @@ show_install_target_notice() {
   echo "스크립트 버전: $SCRIPT_VERSION"
   echo "설치 대상 프로젝트: $PWD"
   echo "참조 로컬 레포: ${REFERENCE_REPO:-없음 (기획·정책 검색 가능)}"
-  echo "이 위치에 .claude/, .codex/agents/ 설정을 생성/갱신합니다."
+  echo "이 위치에 .claude/, .codex/config.toml, .codex/agents/ 설정을 생성/갱신합니다."
   if [ "$UPDATE_AGENTS_MD" = true ]; then
     echo "AGENTS.md의 셔클라봇 관리 블록도 생성/갱신합니다."
   else
     echo "AGENTS.md는 현재 상태로 유지합니다."
   fi
-  echo "Claude local 등록과 Codex 사용자/프로젝트의 기존 메인 MCP 등록을 정리합니다."
+  echo "Claude local 및 Codex 사용자 중복 MCP 등록을 정리하고 Codex 프로젝트 MCP를 갱신합니다."
   echo "Codex 사용자 설정: $CODEX_CONFIG"
   if [ ! -f AGENTS.md ] && [ ! -d .claude ] && [ ! -d .codex ]; then
     echo "주의: 이 폴더에는 AGENTS.md, .claude, .codex가 없습니다."
@@ -144,7 +144,7 @@ check_mcp_connection() {
   if status="$(curl -sS --max-time "$MCP_CHECK_TIMEOUT_SEC" "${MCP_CURL_OPTIONS[@]}" \
     -o /dev/null -w '%{http_code}' -X POST \
     -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"shuclientbot-setup","version":"9"}}}' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"shuclientbot-setup","version":"10"}}}' \
     "$URL")"; then
     echo "initialize -> HTTP $status (200 이면 OK)"
     if [ "$status" = 200 ]; then
@@ -191,8 +191,9 @@ try:
         if changed:
             servers.pop("agentrag", None)
             servers.pop("ShucleRiderRAG", None)
-    elif operation == "agent":
+    elif operation == "project":
         servers = config.setdefault("mcp_servers", tomlkit.table())
+        servers.pop("agentrag", None)
         server = tomlkit.table()
         server.update(json.loads(connection))
         server.update(
@@ -200,7 +201,7 @@ try:
             default_tools_approval_mode="approve",
         )
         servers["ShucleRiderRAG"] = server
-        changed = True
+        changed = tomlkit.dumps(config) != original
     else:
         raise ValueError(f"지원하지 않는 작업: {operation}")
     output = tomlkit.dumps(config)
@@ -212,7 +213,7 @@ try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(output)
         os.chmod(temporary, permissions)
-        if operation == "remove":
+        if path.exists():
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
             backup = path.with_name(f"{path.name}.bak.{stamp}.{os.getpid()}")
             shutil.copy2(path, backup)
@@ -601,11 +602,11 @@ else
 fi
 
 echo
-echo "############ 2) Codex (서브에이전트 전용 MCP) ############"
+echo "############ 2) Codex (프로젝트 MCP + 서브에이전트) ############"
 mkdir -p .codex/agents || die "Codex 설정 디렉터리 생성 실패"
 
 edit_codex_mcp_config "$CODEX_CONFIG" remove
-edit_codex_mcp_config "$PROJECT_CODEX_CONFIG" remove
+edit_codex_mcp_config "$PROJECT_CODEX_CONFIG" project
 
 cat > .codex/agents/shuclientbot.toml <<'CODEX_AGENT_EOF'
 # Codex 서브에이전트 정의 — 셔클라봇(ShuClientBot)
@@ -636,15 +637,11 @@ developer_instructions = """
 7. 런북이 0~6 규칙과 충돌하면 이 규칙이 이긴다.
 """
 
-# ShucleRiderRAG MCP 서버를 이 에이전트에 연결하고 도구 사용을 기본 승인한다.
-# URL은 실행 환경에 맞게 바꾼다. 로컬 서버 기본값은 http://127.0.0.1:8848/mcp 이다.
-[mcp_servers.ShucleRiderRAG]
-url = "http://127.0.0.1:8848/mcp"
-enabled = true
-default_tools_approval_mode = "approve"
+# MCP는 .codex/config.toml에 등록하며, 이 에이전트는 부모 세션의 MCP를 상속한다.
+# 에이전트 파일의 mcp_servers 설정은 Codex에서 적용되지 않는다.
 CODEX_AGENT_EOF
-edit_codex_mcp_config .codex/agents/shuclientbot.toml agent
-echo "  -> .codex/agents/shuclientbot.toml 에 전용 MCP 등록: $URL"
+echo "  -> .codex/config.toml 에 MCP 등록: $URL"
+echo "  -> .codex/agents/shuclientbot.toml 에 셔클라봇 지침 등록 (부모 MCP 상속)"
 
 if [ "$UPDATE_AGENTS_MD" = true ]; then
   update_agents_md
